@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nanopore Gene Methylation Viz</title>
+  <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --surface: #f6f8fa;
+      --border: #d0d7de;
+      --text: #1f2328;
+      --muted: #656d76;
+      --accent: #0969da;
+      --accent-fg: #ffffff;
+      --promoter: rgba(9, 105, 218, 0.15);
+      --exon: rgba(26, 127, 55, 0.25);
+      --intron: rgba(151, 93, 218, 0.15);
+      --cds: rgba(200, 80, 50, 0.35);
+      --downstream: rgba(191, 135, 0, 0.2);
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 1.5rem 2rem;
+      min-height: 100vh;
+    }
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+    }
+    .subtitle {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin-bottom: 1.5rem;
+    }
+    section {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.25rem 1.5rem;
+      margin-bottom: 1.25rem;
+    }
+    section h2 {
+      font-size: 1rem;
+      font-weight: 600;
+      margin: 0 0 1rem 0;
+      color: var(--muted);
+    }
+    .form-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      align-items: flex-end;
+    }
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+    }
+    .field label {
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+    input[type="file"] {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 0.5rem;
+      border-radius: 6px;
+      min-width: 200px;
+    }
+    button {
+      background: var(--accent);
+      color: var(--accent-fg);
+      border: none;
+      padding: 0.55rem 1.1rem;
+      border-radius: 6px;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 0.9rem;
+    }
+    button:hover { opacity: 0.9; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .search-row {
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    #geneSearch {
+      flex: 1;
+      min-width: 200px;
+      padding: 0.5rem 0.75rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 1rem;
+    }
+    #geneSearch:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+    #geneSuggest {
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      max-height: 220px;
+      overflow-y: auto;
+      z-index: 10;
+      margin-top: 2px;
+    }
+    .search-wrap { position: relative; flex: 1; min-width: 200px; }
+    #geneSuggest div {
+      padding: 0.5rem 0.75rem;
+      cursor: pointer;
+      font-size: 0.9rem;
+    }
+    #geneSuggest div:hover { background: var(--border); }
+    .status {
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin-top: 0.5rem;
+    }
+    .status.error { color: #f85149; }
+    .status.ok { color: #3fb950; }
+    #plotContainer {
+      min-height: 420px;
+      width: 100%;
+    }
+    .legend-regions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      margin-top: 0.75rem;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+    .legend-regions span {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+    }
+    .legend-regions i {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      border-radius: 3px;
+    }
+    .legend-regions .promoter { background: var(--promoter); border: 1px solid #88c7ff; }
+    .legend-regions .exon { background: var(--exon); border: 1px solid #79c093; }
+    .legend-regions .intron { background: var(--intron); border: 1px solid #d2a8ff; }
+    .legend-regions .cds { background: var(--cds); border: 1px solid #c85032; }
+    .legend-regions .downstream { background: var(--downstream); border: 1px solid #ffd381; }
+  </style>
+</head>
+<body>
+  <h1>Nanopore Gene Methylation Viz</h1>
+
+  <section>
+    <h2>1. ファイルアップロード</h2>
+    <div class="form-row">
+      <div class="field">
+        <label for="bedFile">modkit BED（例: r0081_m_chr.bed）</label>
+        <input type="file" id="bedFile" accept=".bed,.bed.gz">
+      </div>
+      <button type="button" id="uploadBtn">アップロード</button>
+    </div>
+    <p class="status" id="uploadStatus"></p>
+  </section>
+
+  <section>
+    <h2>2. 遺伝子を検索してグラフ表示</h2>
+    <div class="search-row">
+      <div class="search-wrap">
+        <input type="text" id="geneSearch" placeholder="遺伝子名を入力（例: Xkr4, Bdnf）" autocomplete="off">
+        <div id="geneSuggest" style="display: none;"></div>
+      </div>
+      <button type="button" id="plotBtn" disabled>グラフ表示</button>
+    </div>
+    <p class="status" id="searchStatus"></p>
+    <div class="legend-regions" id="legendRegions" style="display: none;">
+      <span><i class="promoter"></i> Promoter (2k upstream)</span>
+      <span><i class="exon"></i> Exon</span>
+      <span><i class="intron"></i> Intron</span>
+      <span><i class="cds"></i> CDS</span>
+      <span><i class="downstream"></i> Downstream</span>
+    </div>
+    <div id="plotContainer"></div>
+  </section>
+
+  <script>
+    const API = "";
+    let allGenes = [];
+
+    async function postUpload(fd) {
+      const r = await fetch(API + "/api/upload", { method: "POST", body: fd });
+      if (!r.ok) {
+        const t = await r.text();
+        throw new Error(t || r.statusText);
+      }
+      return r.json();
+    }
+
+    async function fetchGenes() {
+      const r = await fetch(API + "/api/genes");
+      if (!r.ok) throw new Error("遺伝子一覧の取得に失敗しました。");
+      const j = await r.json();
+      return j.genes || [];
+    }
+
+    async function fetchGeneData(geneId) {
+      const r = await fetch(API + "/api/gene/" + encodeURIComponent(geneId));
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        throw new Error(j.detail || r.statusText);
+      }
+      return r.json();
+    }
+
+    const uploadStatus = document.getElementById("uploadStatus");
+    const searchStatus = document.getElementById("searchStatus");
+    const geneSearch = document.getElementById("geneSearch");
+    const geneSuggest = document.getElementById("geneSuggest");
+    const plotBtn = document.getElementById("plotBtn");
+    const plotContainer = document.getElementById("plotContainer");
+    const legendRegions = document.getElementById("legendRegions");
+
+    document.getElementById("uploadBtn").addEventListener("click", async () => {
+      const bed = document.getElementById("bedFile").files[0];
+      uploadStatus.textContent = "アップロード・読み込み中…（BED を読み込んでいます）";
+      uploadStatus.className = "status";
+      if (!bed) {
+        uploadStatus.textContent = "BED ファイルを選択してください。";
+        uploadStatus.className = "status error";
+        return;
+      }
+      const fd = new FormData();
+      fd.append("bed", bed);
+      try {
+        await postUpload(fd);
+        uploadStatus.textContent = "アップロード・読み込み完了。遺伝子を検索できます。";
+        uploadStatus.className = "status ok";
+        allGenes = await fetchGenes();
+        plotBtn.disabled = false;
+        searchStatus.textContent = "遺伝子数: " + allGenes.length;
+      } catch (e) {
+        uploadStatus.textContent = "エラー: " + e.message;
+        uploadStatus.className = "status error";
+      }
+    });
+
+    function filterGenes(q) {
+      if (!q || !allGenes.length) return [];
+      const lower = q.toLowerCase();
+      return allGenes.filter(g => g.toLowerCase().includes(lower)).slice(0, 80);
+    }
+
+    geneSearch.addEventListener("input", () => {
+      const list = filterGenes(geneSearch.value.trim());
+      if (list.length === 0) {
+        geneSuggest.style.display = "none";
+        return;
+      }
+      geneSuggest.innerHTML = list.map(g => "<div>" + escapeHtml(g) + "</div>").join("");
+      geneSuggest.style.display = "block";
+      geneSuggest.querySelectorAll("div").forEach((el, i) => {
+        el.addEventListener("click", () => {
+          geneSearch.value = list[i];
+          geneSuggest.style.display = "none";
+        });
+      });
+    });
+    geneSearch.addEventListener("blur", () => setTimeout(() => { geneSuggest.style.display = "none"; }, 200));
+
+    function escapeHtml(s) {
+      const div = document.createElement("div");
+      div.textContent = s;
+      return div.innerHTML;
+    }
+
+    const regionColors = {
+      promoter:   "rgba(136, 199, 255, 0.25)",
+      exon:       "rgba(121, 192, 147, 0.35)",
+      intron:     "rgba(210, 168, 255, 0.2)",
+      cds:        "rgba(200, 80, 50, 0.35)",
+      downstream: "rgba(255, 211, 129, 0.25)"
+    };
+
+    function buildShapes(regions, y0, y1) {
+      if (!regions || !regions.length) return [];
+      return regions.map(r => ({
+        type: "rect",
+        xref: "x", yref: "y",
+        x0: r.start, x1: r.end, y0: y0, y1: y1,
+        fillcolor: regionColors[r.region_type] || "rgba(128,128,128,0.2)",
+        line: { width: 0 },
+        layer: "below"
+      }));
+    }
+
+    plotBtn.addEventListener("click", async () => {
+      const geneId = geneSearch.value.trim();
+      if (!geneId) {
+        searchStatus.textContent = "遺伝子名を入力してください。";
+        searchStatus.className = "status error";
+        return;
+      }
+      searchStatus.textContent = "取得中…";
+      searchStatus.className = "status";
+      try {
+        const data = await fetchGeneData(geneId);
+        const sites = data.sites || [];
+        const regions = data.regions || [];
+        const gene = data.gene || geneId;
+        const chrom = data.chrom || "";
+        const strand = data.strand || "";
+        const exonCount = data.exon_count != null ? data.exon_count : "";
+        const cdsCount = data.cds_count != null ? data.cds_count : "";
+
+        let statusParts = [ gene + " (" + chrom + " strand " + strand + ")" ];
+        if (exonCount !== "" || cdsCount !== "") statusParts.push("exons: " + exonCount + ", CDS: " + cdsCount);
+        statusParts.push(sites.length + " sites");
+        searchStatus.textContent = statusParts.join(" — ");
+        searchStatus.className = "status ok";
+        legendRegions.style.display = "flex";
+
+        const x = sites.map(s => s.position);
+        const y = sites.map(s => s.methylation_ratio != null ? s.methylation_ratio : null);
+        const cov = sites.map(s => s.coverage);
+
+        const yMin = 0;
+        const yMax = 105;
+        const shapes = buildShapes(regions, yMin, yMax);
+
+        Plotly.newPlot(plotContainer, [{
+          type: "scatter",
+          mode: "lines+markers",
+          x: x,
+          y: y,
+          marker: {
+            size: cov.map(c => Math.min(4 + c / 3, 18)),
+            color: "rgb(88, 166, 255)",
+            line: { width: 0 }
+          },
+          line: { color: "rgb(88, 166, 255)", width: 1.5 },
+          hovertemplate: "Position: %{x}<br>Methylation: %{y:.1f}%<br>Coverage: %{customdata}<extra></extra>",
+          customdata: cov,
+          name: "m5C"
+        }], {
+          xaxis: { title: "Genomic position", gridcolor: "rgba(0,0,0,0.1)", zeroline: false },
+          yaxis: { title: "Methylation (%)", range: [yMin, yMax], gridcolor: "rgba(0,0,0,0.1)", zeroline: false },
+          shapes: shapes,
+          margin: { t: 50, r: 40, b: 50, l: 55 },
+          paper_bgcolor: "rgba(0,0,0,0)",
+          plot_bgcolor: "rgba(0,0,0,0)",
+          font: { color: "#1f2328", size: 12 },
+          title: { text: "Gene: " + gene + " (strand " + strand + ", " + exonCount + " exons, " + cdsCount + " CDS)", font: { size: 14 } },
+          showlegend: false
+        }, { responsive: true });
+      } catch (e) {
+        searchStatus.textContent = "エラー: " + e.message;
+        searchStatus.className = "status error";
+        plotContainer.innerHTML = "";
+      }
+    });
+  </script>
+</body>
+</html>
