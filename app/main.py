@@ -1,6 +1,8 @@
 """
 FastAPI backend for nanopore methylation viz: BED upload only; GFF is bundled (pre-processed).
 """
+from __future__ import annotations
+
 import logging
 import pickle
 import tempfile
@@ -10,7 +12,7 @@ from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
@@ -109,6 +111,25 @@ def startup_load_gene_regions():
         )
 
 
+@app.get("/health")
+async def health():
+    """Health check for load balancers and deployment. Returns 200 when the app is up."""
+    return {"status": "ok"}
+
+
+@app.get("/api/status")
+async def api_status():
+    """Return app state: whether gene regions and BED are loaded. Useful for debugging and UI."""
+    gene_regions = _state.get("gene_regions")
+    bed_df = _state.get("bed_df")
+    return {
+        "gene_regions_loaded": gene_regions is not None,
+        "genes_count": len(gene_regions) if gene_regions else 0,
+        "bed_loaded": bed_df is not None,
+        "bed_rows": len(bed_df) if bed_df is not None else 0,
+    }
+
+
 @app.post("/api/upload")
 async def upload_files(
     bed: UploadFile = File(..., description="modkit BED (e.g. *_m_chr.bed)"),
@@ -155,14 +176,18 @@ async def upload_files(
 
 
 @app.get("/api/genes")
-async def list_genes():
-    """Return list of gene identifiers from bundled gene regions."""
+async def list_genes(q: str | None = Query(None, description="Filter genes by substring (case-insensitive)")):
+    """Return list of gene identifiers from bundled gene regions. Optional query param 'q' filters by substring."""
     if _state.get("gene_regions") is None:
         raise HTTPException(
             status_code=503,
             detail="Gene regions not loaded. Place genomic.gff in project root or data/ and restart the app.",
         )
-    return {"genes": sorted(_state["gene_regions"].keys())}
+    genes = sorted(_state["gene_regions"].keys())
+    if q and q.strip():
+        lower = q.strip().lower()
+        genes = [g for g in genes if lower in g.lower()]
+    return {"genes": genes}
 
 
 @app.get("/api/gene/{gene_id:path}")
