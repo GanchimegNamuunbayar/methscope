@@ -9,9 +9,8 @@ from collections import defaultdict
 logger = logging.getLogger(__name__)
 
 ############################
-PROMOTER_UP = 2000
-PROMOTER_DOWN = 500
-DOWNSTREAM_DOWN = 3000
+PROMOTER_UP = 2000   # TSS 上流 (bp)
+DOWNSTREAM_DOWN = 3000  # TES 下流 (bp)
 CHUNKSIZE = 500_000
 
 # GRCm39: GFF seqid (RefSeq) <-> BED chrom (chrN)
@@ -43,10 +42,9 @@ def parse_attr(attr):
     return d
 
 ############################
-def extract_regions(gff_path, promoter_up=None, promoter_down=None, downstream_down=None):
-    """Extract gene regions from GFF. Optional promoter/downstream lengths (bp)."""
+def extract_regions(gff_path, promoter_up=None, downstream_down=None):
+    """Extract gene regions from GFF. promoter_up = TSS 上流 (bp), downstream_down = TES 下流 (bp)."""
     pu = promoter_up if promoter_up is not None else PROMOTER_UP
-    pd_ = promoter_down if promoter_down is not None else PROMOTER_DOWN
     dd = downstream_down if downstream_down is not None else DOWNSTREAM_DOWN
 
     cols = ["seqid","source","type","start","end","score","strand","phase","attr"]
@@ -291,7 +289,6 @@ def get_gene_methylation_for_plot(
     bed_path,
     gene_name,
     promoter_up=2000,
-    promoter_down=2000,
     downstream_down=2000,
 ):
     """
@@ -302,7 +299,6 @@ def get_gene_methylation_for_plot(
     gene_regions = extract_regions(
         gff_path,
         promoter_up=promoter_up,
-        promoter_down=promoter_down,
         downstream_down=downstream_down,
     )
     logger.info("[gene plot] Extracted %d genes. Looking up gene: %s", len(gene_regions), gene_name)

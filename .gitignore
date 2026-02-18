@@ -40,6 +40,8 @@ Thumbs.db
 # Large data files (exceed GitHub 100 MB limit; keep local only)
 data/genomic.gff
 data/gene_regions.pkl
+data/gene_list.json
+data/gene_regions.db
 *.bed
 
 # Logs and temp

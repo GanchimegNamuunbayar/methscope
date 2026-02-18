@@ -29,7 +29,11 @@ pip install -r requirements.txt
 
 ### GFF の内蔵（初回のみ）
 
-アプリは **data/gene_regions.pkl** から遺伝子領域を読み込みます。このファイルは **genomic.gff** を事前に処理して作成します。
+アプリは **genomic.gff** を事前処理したキャッシュから遺伝子領域を読み込みます。ビルドスクリプトは次の3つを出力します。
+
+- **data/gene_list.json** — 遺伝子IDのリスト（起動時にのみ読み込み・低メモリ用）
+- **data/gene_regions.db** — SQLite（遺伝子ごとの領域は **必要なときだけ** 1件ずつ読み込み）
+- **data/gene_regions.pkl** — 従来形式（ローカルで全件メモリに載せる場合用）
 
 1. **genomic.gff** を `data/` に置く（プロジェクトルートの `genomic.gff` をコピーしても可）。
 2. 次のコマンドを実行（数分かかります。約 4 万遺伝子分の領域を抽出します）。
@@ -40,7 +44,7 @@ python scripts/build_gene_regions.py
 python scripts/build_gene_regions.py /path/to/genomic.gff
 ```
 
-これで `data/gene_regions.pkl` が作成され、アプリ起動時に自動で読み込まれます。**genomic.gff はそのまま data/ に保管**しておけば、パラメータ（プロモーター長など）を変えて再実行するときに使えます。
+アプリは **data/gene_list.json と data/gene_regions.db が両方あるとき**は「遅延読み込み」モードで起動し、起動時はリストだけ読むためメモリを抑えられます（Render 無料枠の 512 MB で動作）。**gene_list.json か DB が無い場合**は、従来どおり **data/gene_regions.pkl** を起動時にまとめて読み込みます。**genomic.gff はそのまま data/ に保管**しておけば、パラメータ（プロモーター長など）を変えて再実行するときに使えます。
 
 ## 起動方法
 
@@ -48,7 +52,7 @@ python scripts/build_gene_regions.py /path/to/genomic.gff
 
 ```bash
 source meth_viz_nanopore_env/bin/activate 
-python -m uvicorn app.main:app --reload --port 8000
+/Users/namuuk/Desktop/methscope/meth_viz_nanopore_env/bin/python -m uvicorn app.main:app --reload --port 8000
 ```
 
 ブラウザで **http://localhost:8000** を開く。
@@ -69,18 +73,19 @@ python -m uvicorn app.main:app --reload --port 8000
 
 1. **ポート**  
    本番では環境変数 `PORT` を使うことが多いので、起動コマンドを `uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}` のようにする。
-2. **data/gene_regions.pkl**  
+2. **data/**  
    GitHub には載せない前提なので、デプロイ先で用意する必要がある。  
-   - ビルド時に `genomic.gff` を置き、`python scripts/build_gene_regions.py` を実行して pkl を生成する（ビルド時間・メモリに注意）、  
+   - ビルド時に `genomic.gff` を置き、`python scripts/build_gene_regions.py` を実行すると **gene_list.json**・**gene_regions.db**・**gene_regions.pkl** が生成される。  
+   - **遅延読み込み**: gene_list.json と gene_regions.db があれば、起動時はリストだけ読むため **512 MB で起動可能**（Render 無料枠向け）。  
    - または別ストレージから取得して `data/` に配置する。
 
 ### 無料枠で使うなら（Render / Railway / Fly.io）
 
-このアプリは **起動時に約 100 MB の gene_regions.pkl をメモリに載せる**ため、256 MB だけのインスタンスでは不足しがちです。無料で運用する場合の目安です。
+**遅延読み込み**（gene_list.json + gene_regions.db）を使うと、起動時は遺伝子リストだけを読むため **512 MB の無料枠で起動できます**。遺伝子の領域データはグラフ表示のリクエスト時にその1件だけ DB から読みます。
 
 | サービス | 無料枠の要点 | このプロジェクト向きか |
 |----------|----------------|-------------------------|
-| **[Render](https://render.com)** | 無料 Web サービスあり。**月 750 時間**まで。**15 分アクセスがないとスリープ**し、次のリクエストで復帰（数十秒かかることがある）。メモリは無料枠でも 512 MB 程度が一般的。 | **◎ 無料で使うならここ。** スリープはあるが、デモ・個人利用なら許容しやすい。ビルド時に `gene_regions.pkl` を生成してイメージに含めれば、起動時は pkl を読むだけ。 |
+| **[Render](https://render.com)** | 無料 Web サービスあり。**月 750 時間**まで。**15 分アクセスがないとスリープ**し、次のリクエストで復帰（数十秒かかることがある）。メモリは無料枠でも 512 MB。 | **◎ 無料で使うならここ。** ビルドで gene_list.json + gene_regions.db を生成すれば、遅延読み込みで 512 MB で起動可能。 |
 | **[Railway](https://railway.app)** | **常設の無料枠はなし**。$5 のトライアル後は Hobby で **$5/月**（クレジット込み）の従量課金。 | △ 無料で長く使いたい場合は不向き。有料なら常時起動・設定しやすい。 |
 | **[Fly.io](https://fly.io)** | 無料で **256 MB の VM が 3 台**程度。請求が **$5 未満の月は未請求**になる運用だが、公式保証ではない。256 MB だと pkl + BED で足りない可能性。512 MB にするとわずかに課金の可能性。 | ○ 常時起動にしたい場合の候補。256 MB では厳しいので、512 MB で「ほぼ無料」になるか要確認。 |
 
@@ -94,7 +99,7 @@ python -m uvicorn app.main:app --reload --port 8000
 
 #### 1. 前提：genomic.gff をダウンロード用 URL で用意する
 
-Render のビルドでは `gene_regions.pkl` を生成するために **genomic.gff** が必要です。GitHub には載せないので、次のいずれかで「直接ダウンロードできる URL」を用意します。
+Render のビルドでは **gene_list.json** と **gene_regions.db**（および gene_regions.pkl）を生成するために **genomic.gff** が必要です。GitHub には載せないので、次のいずれかで「直接ダウンロードできる URL」を用意します。
 
 - **Dropbox**: ファイルをアップロード → 共有リンク作成 → リンク末尾の `?dl=0` を **`?dl=1`** に変えた URL（例: `https://www.dropbox.com/s/xxxxx/genomic.gff?dl=1`）
 - **Google Drive**: 共有リンクの ID を使って `https://drive.google.com/uc?export=download&id=ファイルID` 形式の URL（大きいファイルは要確認）
@@ -131,7 +136,7 @@ Render のビルドでは `gene_regions.pkl` を生成するために **genomic.
 |-----|--------|
 | `BUILD_GFF_URL` | 手順 1 で用意した genomic.gff の**直接ダウンロード URL** |
 
-これでビルド時に GFF が取得され、`data/gene_regions.pkl` が生成されます。
+これでビルド時に GFF が取得され、`data/gene_list.json` と `data/gene_regions.db`（および `data/gene_regions.pkl`）が生成されます。アプリは **遅延読み込み** で起動するため、512 MB の無料枠で動作します。
 
 #### 5. デプロイ実行
 
@@ -151,7 +156,7 @@ Render のビルドでは `gene_regions.pkl` を生成するために **genomic.
   - **Logs** タブでエラー内容を確認。  
   - `BUILD_GFF_URL` が正しいか、その URL をブラウザで開いたときに GFF がダウンロードされるか確認。
 - **「Gene regions not loaded」と表示される**  
-  - ビルド時に `gene_regions.pkl` が作られていません。`BUILD_GFF_URL` を設定したうえで **Manual Deploy** → **Clear build cache & deploy** で再デプロイ。
+  - ビルド時に `gene_list.json` と `gene_regions.db`（または `gene_regions.pkl`）が作られていません。`BUILD_GFF_URL` を設定したうえで **Manual Deploy** → **Clear build cache & deploy** で再デプロイ。
 - **起動が遅い**  
   - 無料枠のスリープからの復帰です。そのまま待つか、有料プランでスリープを無効にできます。
 
@@ -187,10 +192,10 @@ meth_viz_nanopore/
 │   └── static/
 │       └── index.html            # フロント（アップロード UI・Plotly グラフ）
 ├── data/
-│   └── .gitkeep                 # genomic.gff / gene_regions.pkl はここに配置（git では無視）
+│   └── .gitkeep                 # genomic.gff / gene_list.json / gene_regions.db / gene_regions.pkl（git では無視）
 └── scripts/
-    ├── build_gene_regions.py    # GFF → gene_regions.pkl 事前処理
-    └── render_build.sh          # Render 用ビルド（BUILD_GFF_URL で GFF 取得 → pkl 生成）
+    ├── build_gene_regions.py    # GFF → gene_list.json + gene_regions.db + gene_regions.pkl
+    └── render_build.sh          # Render 用ビルド（BUILD_GFF_URL で GFF 取得 → 上記生成）
 ```
 
 ## API（参考）

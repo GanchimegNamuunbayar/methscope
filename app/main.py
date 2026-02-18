@@ -1,10 +1,16 @@
 """
 FastAPI backend for nanopore methylation viz: BED upload only; GFF is bundled (pre-processed).
+
+Supports two modes:
+- Lazy-load (low memory): gene_list.json + gene_regions.db — list at startup, load one gene from DB on demand.
+- Legacy: gene_regions.pkl — full dict loaded at startup (local dev).
 """
 from __future__ import annotations
 
+import json
 import logging
 import pickle
+import sqlite3
 import tempfile
 import shutil
 import time
@@ -37,6 +43,8 @@ app.add_middleware(
 
 ROOT = Path(__file__).resolve().parent.parent
 GENE_REGIONS_PATH = ROOT / "data" / "gene_regions.pkl"
+GENE_LIST_PATH = ROOT / "data" / "gene_list.json"
+GENE_REGIONS_DB_PATH = ROOT / "data" / "gene_regions.db"
 
 # Where to look for genomic.gff if .pkl is missing (in order)
 GFF_CANDIDATES = [
@@ -45,6 +53,47 @@ GFF_CANDIDATES = [
     Path(__file__).resolve().parent / "genomic.gff",
     Path(__file__).resolve().parent / "static" / "genomic.gff",
 ]
+
+
+def _load_gene_list_and_db():
+    """Load gene list only; DB path for on-demand reads. Returns (gene_list, db_path) or (None, None)."""
+    if not GENE_LIST_PATH.exists() or not GENE_REGIONS_DB_PATH.exists():
+        return None, None
+    try:
+        with open(GENE_LIST_PATH, encoding="utf-8") as f:
+            gene_list = json.load(f)
+        return gene_list, str(GENE_REGIONS_DB_PATH)
+    except Exception as e:
+        logging.warning("[API] Failed to load gene list / DB: %s", e)
+        return None, None
+
+
+def _resolve_gene_name(gene_list: list[str], query: str) -> str:
+    """Resolve user query to canonical gene_id (same logic as get_gene_methylation_from_cached)."""
+    q = query.strip()
+    if not q:
+        raise KeyError("gene_id is required")
+    # Exact
+    if q in gene_list:
+        return q
+    for k in gene_list:
+        if k == q or k.replace("gene-", "") == q or k.endswith("_" + q):
+            return k
+    # Case-insensitive substring
+    lower = q.lower()
+    for k in gene_list:
+        if lower in k.lower() or k.replace("gene-", "").lower() == lower:
+            return k
+    raise KeyError(f"Gene not found: {query}")
+
+
+def _load_one_gene_regions(db_path: str, gene_id: str):
+    """Load one gene's regs dict from SQLite. Raises KeyError if not found."""
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute("SELECT data FROM genes WHERE gene_id = ?", (gene_id,)).fetchone()
+    if not row:
+        raise KeyError(f"Gene not found: {gene_id}")
+    return pickle.loads(row[0])
 
 
 def _load_bundled_gene_regions():
@@ -63,7 +112,7 @@ def _load_bundled_gene_regions():
             t0 = time.perf_counter()
             try:
                 gene_regions = extract_regions(
-                    gff_path, promoter_up=2000, promoter_down=2000, downstream_down=2000
+                    gff_path, promoter_up=2000, downstream_down=2000
                 )
                 elapsed = round(time.perf_counter() - t0, 1)
                 logging.info("[API] GFF done: %d genes in %.1fs", len(gene_regions), elapsed)
@@ -79,11 +128,28 @@ def _load_bundled_gene_regions():
 
     return None
 
-# In-memory store: BED path + cached BED data (gene_regions are bundled, loaded at startup)
+
+def _gene_regions_ready():
+    """True if gene data is available (lazy or legacy)."""
+    if _state.get("gene_list") is not None and _state.get("gene_regions_db_path"):
+        return True
+    return _state.get("gene_regions") is not None
+
+
+def _genes_count():
+    if _state.get("gene_list") is not None:
+        return len(_state["gene_list"])
+    gr = _state.get("gene_regions")
+    return len(gr) if gr else 0
+
+
+# In-memory store: BED path + cached BED data; gene data is list+DB (lazy) or full dict (legacy)
 _state = {
     "bed_path": None,
     "upload_dir": None,
-    "gene_regions": None,  # loaded at startup from data/gene_regions.pkl
+    "gene_regions": None,  # legacy: full dict from data/gene_regions.pkl
+    "gene_list": None,     # lazy: list of gene IDs from data/gene_list.json
+    "gene_regions_db_path": None,  # lazy: path to data/gene_regions.db
     "bed_df": None,
 }
 
@@ -101,9 +167,17 @@ def _cleanup_upload_dir():
 
 @app.on_event("startup")
 def startup_load_gene_regions():
+    # Prefer lazy-load format (gene_list + DB) for low memory (e.g. Render free tier)
+    gene_list, db_path = _load_gene_list_and_db()
+    if gene_list is not None and db_path:
+        _state["gene_list"] = gene_list
+        _state["gene_regions_db_path"] = db_path
+        logging.info("[API] Lazy-load mode: gene list %d genes, DB at %s", len(gene_list), db_path)
+        return
+    # Fallback: full in-memory (legacy pkl)
     _state["gene_regions"] = _load_bundled_gene_regions()
     if _state["gene_regions"] is not None:
-        logging.info("[API] Loaded gene regions: %d genes", len(_state["gene_regions"]))
+        logging.info("[API] Loaded gene regions (legacy): %d genes", len(_state["gene_regions"]))
     else:
         logging.warning(
             "[API] No gene regions. Place genomic.gff in project root or data/ and restart; "
@@ -120,11 +194,10 @@ async def health():
 @app.get("/api/status")
 async def api_status():
     """Return app state: whether gene regions and BED are loaded. Useful for debugging and UI."""
-    gene_regions = _state.get("gene_regions")
     bed_df = _state.get("bed_df")
     return {
-        "gene_regions_loaded": gene_regions is not None,
-        "genes_count": len(gene_regions) if gene_regions else 0,
+        "gene_regions_loaded": _gene_regions_ready(),
+        "genes_count": _genes_count(),
         "bed_loaded": bed_df is not None,
         "bed_rows": len(bed_df) if bed_df is not None else 0,
     }
@@ -135,7 +208,7 @@ async def upload_files(
     bed: UploadFile = File(..., description="modkit BED (e.g. *_m_chr.bed)"),
 ):
     """Upload BED file only. Gene annotation is from bundled pre-processed GFF."""
-    if _state.get("gene_regions") is None:
+    if not _gene_regions_ready():
         raise HTTPException(
             status_code=503,
             detail="Gene regions not loaded. Place genomic.gff in project root or data/ and restart the app.",
@@ -155,7 +228,7 @@ async def upload_files(
 
     _state["bed_path"] = str(bed_path)
 
-    load_stats = {"genes_count": len(_state["gene_regions"]), "bed_rows": 0, "time_bed_sec": 0}
+    load_stats = {"genes_count": _genes_count(), "bed_rows": 0, "time_bed_sec": 0}
     t0 = time.perf_counter()
     try:
         logging.info("[API] Loading BED...")
@@ -178,12 +251,15 @@ async def upload_files(
 @app.get("/api/genes")
 async def list_genes(q: str | None = Query(None, description="Filter genes by substring (case-insensitive)")):
     """Return list of gene identifiers from bundled gene regions. Optional query param 'q' filters by substring."""
-    if _state.get("gene_regions") is None:
+    if not _gene_regions_ready():
         raise HTTPException(
             status_code=503,
             detail="Gene regions not loaded. Place genomic.gff in project root or data/ and restart the app.",
         )
-    genes = sorted(_state["gene_regions"].keys())
+    if _state.get("gene_list") is not None:
+        genes = _state["gene_list"]  # already sorted from build
+    else:
+        genes = sorted(_state["gene_regions"].keys())
     if q and q.strip():
         lower = q.strip().lower()
         genes = [g for g in genes if lower in g.lower()]
@@ -197,7 +273,7 @@ async def get_gene_methylation(gene_id: str):
     bed_path = _state.get("bed_path")
     if not bed_path or not Path(bed_path).exists():
         raise HTTPException(status_code=400, detail="No BED uploaded. Please upload BED first.")
-    if _state.get("gene_regions") is None:
+    if not _gene_regions_ready():
         raise HTTPException(status_code=503, detail="Gene regions not loaded. Place genomic.gff in project root or data/ and restart.")
     if _state.get("bed_df") is None:
         raise HTTPException(status_code=400, detail="BED not loaded. Please upload BED first.")
@@ -206,10 +282,15 @@ async def get_gene_methylation(gene_id: str):
         raise HTTPException(status_code=400, detail="gene_id is required.")
 
     try:
-
-        data = get_gene_methylation_from_cached(
-            _state["gene_regions"], _state["bed_df"], gene_id.strip()
-        )
+        if _state.get("gene_list") is not None and _state.get("gene_regions_db_path"):
+            canonical = _resolve_gene_name(_state["gene_list"], gene_id.strip())
+            regs = _load_one_gene_regions(_state["gene_regions_db_path"], canonical)
+            gene_regions_one = {canonical: regs}
+            data = get_gene_methylation_from_cached(gene_regions_one, _state["bed_df"], canonical)
+        else:
+            data = get_gene_methylation_from_cached(
+                _state["gene_regions"], _state["bed_df"], gene_id.strip()
+            )
         logging.info("[API] Gene plot done: %s (%d sites)", data.get("gene"), len(data.get("sites", [])))
         return data
     except KeyError as e:
