@@ -1,0 +1,40 @@
+# Git and IDE
+.git
+.gitignore
+.idea
+.vscode
+*.swp
+*.swo
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info
+.eggs
+*.egg
+
+# Virtual envs
+.venv
+venv
+env
+meth_viz_nanopore_env
+
+# Large/generated data
+data/genomic.gff
+data/gene_regions.pkl
+data/gene_list.json
+data/gene_regions.db
+data/uploads
+*.bed
+
+# Docs and dev
+README.md
+PROJECT_PLAN.md
+.pytest_cache
+.coverage
+htmlcov
+*.log
+.DS_Store

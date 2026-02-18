@@ -4,16 +4,20 @@ FastAPI backend for nanopore methylation viz: BED upload only; GFF is bundled (p
 Supports two modes:
 - Lazy-load (low memory): gene_list.json + gene_regions.db — list at startup, load one gene from DB on demand.
 - Legacy: gene_regions.pkl — full dict loaded at startup (local dev).
+
+Upload uses async jobs: save file and return job_id immediately (avoids Render 502 timeout);
+BED is loaded in a background task; client polls GET /api/jobs/{job_id} until ready.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import pickle
 import sqlite3
-import tempfile
 import shutil
 import time
+import uuid
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
@@ -45,6 +49,7 @@ ROOT = Path(__file__).resolve().parent.parent
 GENE_REGIONS_PATH = ROOT / "data" / "gene_regions.pkl"
 GENE_LIST_PATH = ROOT / "data" / "gene_list.json"
 GENE_REGIONS_DB_PATH = ROOT / "data" / "gene_regions.db"
+UPLOAD_DIR = ROOT / "data" / "uploads"
 
 # Where to look for genomic.gff if .pkl is missing (in order)
 GFF_CANDIDATES = [
@@ -143,30 +148,56 @@ def _genes_count():
     return len(gr) if gr else 0
 
 
-# In-memory store: BED path + cached BED data; gene data is list+DB (lazy) or full dict (legacy)
+# In-memory store: job-based BED (for Render: upload returns fast, process in background)
+# _jobs[job_id] = { "status": "processing"|"ready", "bed_df": None|DataFrame, "bed_path": str, "created_at": float }
+_jobs: dict[str, dict] = {}
 _state = {
-    "bed_path": None,
-    "upload_dir": None,
-    "gene_regions": None,  # legacy: full dict from data/gene_regions.pkl
-    "gene_list": None,     # lazy: list of gene IDs from data/gene_list.json
-    "gene_regions_db_path": None,  # lazy: path to data/gene_regions.db
-    "bed_df": None,
+    "current_job_id": None,  # latest ready job_id; /api/gene uses this job's bed_df
+    "gene_regions": None,
+    "gene_list": None,
+    "gene_regions_db_path": None,
 }
 
 
-def _cleanup_upload_dir():
-    if _state.get("upload_dir") and Path(_state["upload_dir"]).exists():
-        try:
-            shutil.rmtree(_state["upload_dir"], ignore_errors=True)
-        except Exception:
-            pass
-        _state["upload_dir"] = None
-    _state["bed_path"] = None
-    _state["bed_df"] = None
+def _get_current_bed_df():
+    """Return bed_df for the current job if ready, else None."""
+    jid = _state.get("current_job_id")
+    if not jid:
+        return None
+    job = _jobs.get(jid)
+    if not job or job.get("status") != "ready" or job.get("bed_df") is None:
+        return None
+    return job["bed_df"]
+
+
+def _evict_other_jobs(keep_job_id: str):
+    """Keep only one job with bed_df in memory (for 512MB limit). Drop bed_df from others."""
+    for jid, job in list(_jobs.items()):
+        if jid != keep_job_id and job.get("bed_df") is not None:
+            job["bed_df"] = None
+            logging.info("[API] Evicted job %s from memory (keep %s)", jid, keep_job_id)
+
+
+async def _process_job(job_id: str, bed_path: Path):
+    """Load BED in a thread (CPU-bound); then set job ready and evict previous job."""
+    try:
+        loop = asyncio.get_event_loop()
+        bed_df = await loop.run_in_executor(None, load_bed_dataframe, bed_path)
+        _jobs[job_id]["bed_df"] = bed_df
+        _jobs[job_id]["status"] = "ready"
+        _jobs[job_id]["bed_rows"] = len(bed_df)
+        _state["current_job_id"] = job_id
+        _evict_other_jobs(job_id)
+        logging.info("[API] Job %s ready: %d rows", job_id, len(bed_df))
+    except Exception as e:
+        logging.exception("[API] Job %s failed: %s", job_id, e)
+        _jobs[job_id]["status"] = "failed"
+        _jobs[job_id]["error"] = str(e)
 
 
 @app.on_event("startup")
 def startup_load_gene_regions():
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     # Prefer lazy-load format (gene_list + DB) for low memory (e.g. Render free tier)
     gene_list, db_path = _load_gene_list_and_db()
     if gene_list is not None and db_path:
@@ -194,12 +225,13 @@ async def health():
 @app.get("/api/status")
 async def api_status():
     """Return app state: whether gene regions and BED are loaded. Useful for debugging and UI."""
-    bed_df = _state.get("bed_df")
+    bed_df = _get_current_bed_df()
     return {
         "gene_regions_loaded": _gene_regions_ready(),
         "genes_count": _genes_count(),
         "bed_loaded": bed_df is not None,
         "bed_rows": len(bed_df) if bed_df is not None else 0,
+        "current_job_id": _state.get("current_job_id"),
     }
 
 
@@ -207,45 +239,43 @@ async def api_status():
 async def upload_files(
     bed: UploadFile = File(..., description="modkit BED (e.g. *_m_chr.bed)"),
 ):
-    """Upload BED file only. Gene annotation is from bundled pre-processed GFF."""
+    """Upload BED: save file and return job_id immediately. BED is loaded in background (avoids timeout on Render)."""
     if not _gene_regions_ready():
         raise HTTPException(
             status_code=503,
             detail="Gene regions not loaded. Place genomic.gff in project root or data/ and restart the app.",
         )
-    _cleanup_upload_dir()
-    upload_dir = Path(tempfile.mkdtemp(prefix="meth_viz_"))
-    _state["upload_dir"] = str(upload_dir)
-
-    bed_path = upload_dir / (bed.filename or "uploaded.bed")
+    job_id = str(uuid.uuid4())
+    bed_path = UPLOAD_DIR / f"{job_id}.bed"
     try:
-        with open(bed_path, "wb") as f:
-            content = await bed.read()
-            f.write(content)
+        content = await bed.read()
+        bed_path.write_bytes(content)
     except Exception as e:
-        _cleanup_upload_dir()
         raise HTTPException(status_code=400, detail=f"Failed to save BED: {e}")
 
-    _state["bed_path"] = str(bed_path)
-
-    load_stats = {"genes_count": _genes_count(), "bed_rows": 0, "time_bed_sec": 0}
-    t0 = time.perf_counter()
-    try:
-        logging.info("[API] Loading BED...")
-        _state["bed_df"] = load_bed_dataframe(bed_path)
-        load_stats["bed_rows"] = len(_state["bed_df"])
-        load_stats["time_bed_sec"] = round(time.perf_counter() - t0, 2)
-        logging.info("[API] BED done: %d rows in %.1fs", load_stats["bed_rows"], load_stats["time_bed_sec"])
-    except Exception as e:
-        logging.exception("[API] BED load failed: %s", e)
-        _state["bed_df"] = None
-        raise HTTPException(status_code=500, detail=f"Failed to load BED: {e}")
-
-    return {
-        "status": "ok",
-        "message": "BED uploaded and loaded. You can search genes and view plots.",
-        "load_stats": load_stats,
+    _jobs[job_id] = {
+        "status": "processing",
+        "bed_df": None,
+        "bed_path": str(bed_path),
+        "created_at": time.time(),
     }
+    asyncio.create_task(_process_job(job_id, bed_path))
+    logging.info("[API] Upload job %s created; processing in background", job_id)
+    return {"job_id": job_id, "status": "processing"}
+
+
+@app.get("/api/jobs/{job_id}")
+async def get_job_status(job_id: str):
+    """Poll job status after upload. Returns processing | ready | failed."""
+    if job_id not in _jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = _jobs[job_id]
+    out = {"job_id": job_id, "status": job["status"]}
+    if job["status"] == "ready":
+        out["bed_rows"] = job.get("bed_rows", 0)
+    if job["status"] == "failed":
+        out["error"] = job.get("error", "Unknown error")
+    return out
 
 
 @app.get("/api/genes")
@@ -270,13 +300,14 @@ async def list_genes(q: str | None = Query(None, description="Filter genes by su
 async def get_gene_methylation(gene_id: str):
     """Return methylation sites and region boundaries for the given gene (for interactive plot)."""
     logging.info("[API] Gene plot request: %s", gene_id)
-    bed_path = _state.get("bed_path")
-    if not bed_path or not Path(bed_path).exists():
-        raise HTTPException(status_code=400, detail="No BED uploaded. Please upload BED first.")
+    bed_df = _get_current_bed_df()
     if not _gene_regions_ready():
         raise HTTPException(status_code=503, detail="Gene regions not loaded. Place genomic.gff in project root or data/ and restart.")
-    if _state.get("bed_df") is None:
-        raise HTTPException(status_code=400, detail="BED not loaded. Please upload BED first.")
+    if bed_df is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No BED ready. Upload a BED file and wait until job status is 'ready' (poll /api/jobs/{job_id}).",
+        )
 
     if not gene_id or not gene_id.strip():
         raise HTTPException(status_code=400, detail="gene_id is required.")
@@ -286,10 +317,10 @@ async def get_gene_methylation(gene_id: str):
             canonical = _resolve_gene_name(_state["gene_list"], gene_id.strip())
             regs = _load_one_gene_regions(_state["gene_regions_db_path"], canonical)
             gene_regions_one = {canonical: regs}
-            data = get_gene_methylation_from_cached(gene_regions_one, _state["bed_df"], canonical)
+            data = get_gene_methylation_from_cached(gene_regions_one, bed_df, canonical)
         else:
             data = get_gene_methylation_from_cached(
-                _state["gene_regions"], _state["bed_df"], gene_id.strip()
+                _state["gene_regions"], bed_df, gene_id.strip()
             )
         logging.info("[API] Gene plot done: %s (%d sites)", data.get("gene"), len(data.get("sites", [])))
         return data

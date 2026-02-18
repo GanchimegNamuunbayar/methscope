@@ -212,6 +212,20 @@
       return r.json();
     }
 
+    async function pollJobUntilReady(jobId) {
+      const maxAttempts = 120;
+      const intervalMs = 2000;
+      for (let i = 0; i < maxAttempts; i++) {
+        const r = await fetch(API + "/api/jobs/" + encodeURIComponent(jobId));
+        if (!r.ok) throw new Error("Job status check failed.");
+        const j = await r.json();
+        if (j.status === "ready") return j;
+        if (j.status === "failed") throw new Error(j.error || "Job failed.");
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      }
+      throw new Error("Timeout waiting for BED to be ready.");
+    }
+
     async function fetchGenes() {
       const r = await fetch(API + "/api/genes");
       if (!r.ok) throw new Error("遺伝子一覧の取得に失敗しました。");
@@ -238,7 +252,7 @@
 
     document.getElementById("uploadBtn").addEventListener("click", async () => {
       const bed = document.getElementById("bedFile").files[0];
-      uploadStatus.textContent = "アップロード・読み込み中…（BED を読み込んでいます）";
+      uploadStatus.textContent = "アップロード中…";
       uploadStatus.className = "status";
       if (!bed) {
         uploadStatus.textContent = "BED ファイルを選択してください。";
@@ -248,7 +262,10 @@
       const fd = new FormData();
       fd.append("bed", bed);
       try {
-        await postUpload(fd);
+        const res = await postUpload(fd);
+        const jobId = res.job_id;
+        uploadStatus.textContent = "読み込み中…（サーバーで BED を処理しています。しばらくお待ちください）";
+        await pollJobUntilReady(jobId);
         uploadStatus.textContent = "アップロード・読み込み完了。遺伝子を検索できます。";
         uploadStatus.className = "status ok";
         allGenes = await fetchGenes();

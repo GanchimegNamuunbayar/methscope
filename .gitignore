@@ -42,6 +42,7 @@ data/genomic.gff
 data/gene_regions.pkl
 data/gene_list.json
 data/gene_regions.db
+data/uploads/
 *.bed
 
 # Logs and temp

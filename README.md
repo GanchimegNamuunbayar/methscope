@@ -57,6 +57,85 @@ source meth_viz_nanopore_env/bin/activate
 
 ブラウザで **http://localhost:8000** を開く。
 
+### Docker で動かす
+
+#### ステップ 1: Docker が入っているか確認する
+
+ターミナルで次を実行し、バージョンが表示されれば OK です。
+
+```bash
+docker --version
+```
+
+入っていない場合は [Docker Desktop](https://www.docker.com/products/docker-desktop/)（Mac/Windows）などをインストールしてください。
+
+---
+
+#### ステップ 2: 遺伝子データ（data）を用意する
+
+アプリは起動時に **data/gene_list.json** と **data/gene_regions.db** を参照します。  
+すでにローカルで `python scripts/build_gene_regions.py` を実行してある場合は、プロジェクト直下の **data/** にこの 2 ファイルがあればそのまま使えます。
+
+- まだない場合: `data/genomic.gff` を置き、`python scripts/build_gene_regions.py` を実行して `gene_list.json` と `gene_regions.db` を生成してください（README の「GFF の内蔵」を参照）。
+
+---
+
+#### ステップ 3: プロジェクトのディレクトリに移動する
+
+```bash
+cd /Users/namuuk/Desktop/methscope
+```
+
+（パスは自分のプロジェクトの場所に合わせてください。）
+
+---
+
+#### ステップ 4: Docker イメージをビルドする
+
+```bash
+docker build -t methscope .
+```
+
+- `-t methscope` でイメージ名を「methscope」にしています。
+- 初回は数分かかることがあります。
+
+---
+
+#### ステップ 5: コンテナを実行する
+
+```bash
+docker run -p 8000:8000 -v "$(pwd)/data:/app/data" methscope
+```
+
+- **-p 8000:8000** … ホストの 8000 番をコンテナの 8000 番に繋ぎます。
+- **-v "$(pwd)/data:/app/data"** … 今いるディレクトリの **data/** をコンテナ内の **/app/data** にマウントします（gene_list.json と gene_regions.db をコンテナから参照するため）。
+- ログに `Uvicorn running on http://0.0.0.0:8000` と出れば起動しています。
+
+---
+
+#### ステップ 6: ブラウザで開く
+
+ブラウザで次の URL を開きます。
+
+**http://localhost:8000**
+
+BED をアップロードして、遺伝子検索・グラフ表示まで試せます。
+
+---
+
+#### よく使う操作
+
+| やりたいこと | コマンド |
+|--------------|----------|
+| コンテナを止める | コンテナが動いているターミナルで **Ctrl+C** |
+| バックグラウンドで動かす | `docker run -d -p 8000:8000 -v "$(pwd)/data:/app/data" --name methscope-app methscope` |
+| 動いているコンテナを止める | `docker stop methscope-app` |
+| 止めたコンテナを再開 | `docker start methscope-app` |
+| イメージをやり直してから実行 | `docker build -t methscope .` のあと、再度 `docker run ...` |
+
+- イメージ内では `data/` は空なので、**gene_list.json** と **gene_regions.db** は必ず `-v` でマウントするか、コンテナ内に別途用意してください。
+- 本番（Render 等）では環境変数 `PORT` に合わせてコンテナ内でポートが切り替わるようになっています。
+
 ## デプロイ（本番環境）
 
 このアプリは **常時起動の Python サーバー**と**メモリ上の状態**（起動時に読み込む `gene_regions.pkl`、アップロードした BED）に依存しているため、**Vercel のようなサーバーレス環境には向いていません**（インスタンスごとにメモリが分かれる・制限が厳しい・大容量 pkl のコールドスタートが重い）。
@@ -159,6 +238,29 @@ Render のビルドでは **gene_list.json** と **gene_regions.db**（および
   - ビルド時に `gene_list.json` と `gene_regions.db`（または `gene_regions.pkl`）が作られていません。`BUILD_GFF_URL` を設定したうえで **Manual Deploy** → **Clear build cache & deploy** で再デプロイ。
 - **起動が遅い**  
   - 無料枠のスリープからの復帰です。そのまま待つか、有料プランでスリープを無効にできます。
+
+---
+
+## CI/CD (GitHub Actions)
+
+`.github/workflows/deploy.yml` で以下を実行します。
+
+- **CI**（push / PR 時）  
+  - Python 3.11 で `pip install -r requirements.txt`  
+  - アプリのインポート確認（`from app.main import app`）  
+  - `docker build` で Dockerfile のビルド確認  
+- **CD**（main への push のみ、CI 成功後）  
+  - Render の **Deploy Hook** を POST してデプロイを開始  
+
+### Render Deploy Hook の設定（CD で自動デプロイする場合）
+
+1. [Render Dashboard](https://dashboard.render.com) → 対象の Web Service → **Settings**  
+2. **Deploy Hook** の URL をコピー  
+3. GitHub リポジトリ → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**  
+4. Name: `RENDER_DEPLOY_HOOK_URL`、Value: コピーした Deploy Hook URL を貼って保存  
+
+これで `main` に push すると、CI 通過後に Render が自動で再デプロイされます。  
+（Secret を設定しない場合は CD ステップはスキップされ、CI のみ実行されます。）
 
 ---
 
