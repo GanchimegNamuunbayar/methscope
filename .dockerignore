@@ -32,7 +32,6 @@ data/uploads
 
 # Docs and dev
 README.md
-PROJECT_PLAN.md
 .pytest_cache
 .coverage
 htmlcov

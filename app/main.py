@@ -13,9 +13,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import pickle
 import sqlite3
-import shutil
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -51,6 +52,10 @@ GENE_LIST_PATH = ROOT / "data" / "gene_list.json"
 GENE_REGIONS_DB_PATH = ROOT / "data" / "gene_regions.db"
 UPLOAD_DIR = ROOT / "data" / "uploads"
 
+# S3 prefix under bucket (optional: set S3_BUCKET env to enable)
+S3_PREFIX_REFERENCE = "methscope-data/reference"
+S3_PREFIX_UPLOADS = "methscope-data/uploads"
+
 # Where to look for genomic.gff if .pkl is missing (in order)
 GFF_CANDIDATES = [
     ROOT / "data" / "genomic.gff",
@@ -58,6 +63,95 @@ GFF_CANDIDATES = [
     Path(__file__).resolve().parent / "genomic.gff",
     Path(__file__).resolve().parent / "static" / "genomic.gff",
 ]
+
+
+def _get_s3_bucket():
+    """Return bucket name from env (S3 or R2), or None if not configured."""
+    return (
+        os.environ.get("R2_BUCKET")
+        or os.environ.get("S3_BUCKET")
+        or os.environ.get("AWS_S3_BUCKET")
+    )
+
+
+def _get_s3_client():
+    """Return boto3 S3 client (S3 or Cloudflare R2), or None if not configured."""
+    bucket = _get_s3_bucket()
+    if not bucket:
+        return None
+    try:
+        import boto3
+        from botocore.config import Config
+        # Cloudflare R2 (S3-compatible API)
+        account_id = os.environ.get("R2_ACCOUNT_ID") or os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+        if account_id and (os.environ.get("R2_ACCESS_KEY_ID") or os.environ.get("R2_SECRET_ACCESS_KEY")):
+            endpoint = f"https://{account_id}.r2.cloudflarestorage.com"
+            return boto3.client(
+                "s3",
+                endpoint_url=endpoint,
+                region_name="auto",
+                aws_access_key_id=os.environ.get("R2_ACCESS_KEY_ID", ""),
+                aws_secret_access_key=os.environ.get("R2_SECRET_ACCESS_KEY", ""),
+                config=Config(signature_version="s3v4"),
+            )
+        # AWS S3
+        return boto3.client("s3", region_name=os.environ.get("AWS_REGION", "us-east-1"))
+    except Exception as e:
+        logging.warning("[API] S3/R2 client init failed: %s", e)
+        return None
+
+
+def _s3_download_reference_if_needed():
+    """If gene_list.json / gene_regions.db missing locally and S3 is set, download from S3."""
+    bucket = _get_s3_bucket()
+    if not bucket or (GENE_LIST_PATH.exists() and GENE_REGIONS_DB_PATH.exists()):
+        return
+    client = _get_s3_client()
+    if not client:
+        return
+    data_dir = GENE_LIST_PATH.parent
+    data_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("gene_list.json", "gene_regions.db"):
+        local = data_dir / name
+        if local.exists():
+            continue
+        key = f"{S3_PREFIX_REFERENCE}/{name}"
+        try:
+            client.download_file(bucket, key, str(local))
+            logging.info("[API] Downloaded %s from s3://%s/%s", name, bucket, key)
+        except client.exceptions.NoSuchKey:
+            logging.debug("[API] S3 key not found: %s", key)
+        except Exception as e:
+            logging.warning("[API] S3 download %s failed: %s", name, e)
+
+
+def _s3_upload_bytes(s3_key: str, body: bytes) -> bool:
+    """Upload bytes to S3. Returns True on success."""
+    client = _get_s3_client()
+    if not client:
+        return False
+    bucket = _get_s3_bucket()
+    try:
+        client.put_object(Bucket=bucket, Key=s3_key, Body=body)
+        logging.info("[API] Uploaded s3://%s/%s", bucket, s3_key)
+        return True
+    except Exception as e:
+        logging.exception("[API] S3 upload failed: %s", e)
+        return False
+
+
+def _s3_download_to_path(s3_key: str, local_path: Path) -> bool:
+    """Download S3 object to local path. Returns True on success."""
+    client = _get_s3_client()
+    if not client:
+        return False
+    bucket = _get_s3_bucket()
+    try:
+        client.download_file(bucket, s3_key, str(local_path))
+        return True
+    except Exception as e:
+        logging.warning("[API] S3 download %s failed: %s", s3_key, e)
+        return False
 
 
 def _load_gene_list_and_db():
@@ -178,11 +272,25 @@ def _evict_other_jobs(keep_job_id: str):
             logging.info("[API] Evicted job %s from memory (keep %s)", jid, keep_job_id)
 
 
-async def _process_job(job_id: str, bed_path: Path):
-    """Load BED in a thread (CPU-bound); then set job ready and evict previous job."""
+async def _process_job(job_id: str, bed_path: Path | None, s3_key: str | None):
+    """Load BED in a thread (CPU-bound); then set job ready and evict previous job. If s3_key is set, download to temp first."""
+    path = bed_path
+    if s3_key:
+        fd, path_str = tempfile.mkstemp(suffix=".bed")
+        path = Path(path_str)
+        try:
+            os.close(fd)
+            if not _s3_download_to_path(s3_key, path):
+                raise RuntimeError("Failed to download BED from S3")
+        except Exception as e:
+            if path.exists():
+                path.unlink(missing_ok=True)
+            _jobs[job_id]["status"] = "failed"
+            _jobs[job_id]["error"] = str(e)
+            return
     try:
         loop = asyncio.get_event_loop()
-        bed_df = await loop.run_in_executor(None, load_bed_dataframe, bed_path)
+        bed_df = await loop.run_in_executor(None, load_bed_dataframe, path)
         _jobs[job_id]["bed_df"] = bed_df
         _jobs[job_id]["status"] = "ready"
         _jobs[job_id]["bed_rows"] = len(bed_df)
@@ -193,11 +301,16 @@ async def _process_job(job_id: str, bed_path: Path):
         logging.exception("[API] Job %s failed: %s", job_id, e)
         _jobs[job_id]["status"] = "failed"
         _jobs[job_id]["error"] = str(e)
+    finally:
+        if s3_key and path and path.exists():
+            path.unlink(missing_ok=True)
 
 
 @app.on_event("startup")
 def startup_load_gene_regions():
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    # If S3 is configured and reference data missing locally, download from S3
+    _s3_download_reference_if_needed()
     # Prefer lazy-load format (gene_list + DB) for low memory (e.g. Render free tier)
     gene_list, db_path = _load_gene_list_and_db()
     if gene_list is not None and db_path:
@@ -239,27 +352,35 @@ async def api_status():
 async def upload_files(
     bed: UploadFile = File(..., description="modkit BED (e.g. *_m_chr.bed)"),
 ):
-    """Upload BED: save file and return job_id immediately. BED is loaded in background (avoids timeout on Render)."""
+    """Upload BED: save to local or S3 and return job_id immediately. BED is loaded in background."""
     if not _gene_regions_ready():
         raise HTTPException(
             status_code=503,
             detail="Gene regions not loaded. Place genomic.gff in project root or data/ and restart the app.",
         )
     job_id = str(uuid.uuid4())
-    bed_path = UPLOAD_DIR / f"{job_id}.bed"
-    try:
-        content = await bed.read()
-        bed_path.write_bytes(content)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to save BED: {e}")
+    content = await bed.read()
+    bed_path = None
+    s3_key = None
+    if _get_s3_bucket():
+        s3_key = f"{S3_PREFIX_UPLOADS}/{job_id}.bed"
+        if not _s3_upload_bytes(s3_key, content):
+            raise HTTPException(status_code=500, detail="Failed to upload BED to S3")
+    else:
+        bed_path = UPLOAD_DIR / f"{job_id}.bed"
+        try:
+            bed_path.write_bytes(content)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to save BED: {e}")
 
     _jobs[job_id] = {
         "status": "processing",
         "bed_df": None,
-        "bed_path": str(bed_path),
+        "bed_path": str(bed_path) if bed_path else None,
+        "s3_key": s3_key,
         "created_at": time.time(),
     }
-    asyncio.create_task(_process_job(job_id, bed_path))
+    asyncio.create_task(_process_job(job_id, bed_path, s3_key))
     logging.info("[API] Upload job %s created; processing in background", job_id)
     return {"job_id": job_id, "status": "processing"}
 

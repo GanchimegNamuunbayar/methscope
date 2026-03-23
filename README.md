@@ -1,318 +1,161 @@
-# Nanopore Gene Methylation Viz
+# Nanopore Gene Methylation Viz (methscope)
 
-**Short description:** Web app to visualize nanopore methylation (modkit BED) along gene structure—promoter, exon, intron, CDS, downstream—with built-in GFF annotation. Upload BED, search by gene name, view interactive plots with strand and exon/CDS counts.
+**English:** Web app to visualize nanopore methylation (modkit BED) along gene structure—promoter, exon, intron, CDS, downstream—with **built-in GFF annotation** (pre-processed cache). Upload BED, search by gene, view interactive Plotly charts.
 
-modkit 出力 **BED のみ**をアップロードし、遺伝子名で検索して**プロモーター（上流 2k）・エクソン・イントロン・CDS・下流**のメチル化をインタラクティブグラフで表示する Web アプリ。**アノテーション（GFF）はアプリに内蔵**し、事前処理キャッシュで起動が速い。
+**日本語:** modkit 出力 **BED のみ**をアップロードし、遺伝子名で検索してメチル化を表示。**GFF はアプリ内蔵**（事前ビルドした `gene_list.json` + `gene_regions.db`）。
+
+---
 
 ## 必要な環境
 
-- Python 3.8+
-- pandas, numpy, pyranges, fastapi, uvicorn
+- Python 3.11 推奨（3.8+）
+- 依存: `requirements.txt` を参照（FastAPI, pandas, pyranges, boto3 など）
 
 ## セットアップ
 
-**推奨**: Jupyter / spacy 等と Pydantic のバージョンが衝突するため、**このプロジェクト専用の仮想環境**を作成してから入れると安全です。
-
 ```bash
-cd meth_viz_nanopore
-python3 -m venv meth_viz_nanopore_env
-source meth_viz_nanopore_env/bin/activate  # Windows: .venv\Scripts\activate
+cd methscope
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-仮想環境を使わない場合:
+**Pydantic 2 が必要**です。conda base と混ぜると `IncEx` エラーになることがあるので、**必ずこの venv の Python で** `python -m uvicorn ...` を実行してください。
 
-```bash
-cd meth_viz_nanopore
-pip install -r requirements.txt
-```
+## 参照データのビルド（初回）
 
-### GFF の内蔵（初回のみ）
-
-アプリは **genomic.gff** を事前処理したキャッシュから遺伝子領域を読み込みます。ビルドスクリプトは次の3つを出力します。
-
-- **data/gene_list.json** — 遺伝子IDのリスト（起動時にのみ読み込み・低メモリ用）
-- **data/gene_regions.db** — SQLite（遺伝子ごとの領域は **必要なときだけ** 1件ずつ読み込み）
-- **data/gene_regions.pkl** — 従来形式（ローカルで全件メモリに載せる場合用）
-
-1. **genomic.gff** を `data/` に置く（プロジェクトルートの `genomic.gff` をコピーしても可）。
-2. 次のコマンドを実行（数分かかります。約 4 万遺伝子分の領域を抽出します）。
+`data/genomic.gff` を置き、次を実行（数分かかります）。
 
 ```bash
 python scripts/build_gene_regions.py
-# または GFF のパスを指定:
-python scripts/build_gene_regions.py /path/to/genomic.gff
 ```
 
-アプリは **data/gene_list.json と data/gene_regions.db が両方あるとき**は「遅延読み込み」モードで起動し、起動時はリストだけ読むためメモリを抑えられます（Render 無料枠の 512 MB で動作）。**gene_list.json か DB が無い場合**は、従来どおり **data/gene_regions.pkl** を起動時にまとめて読み込みます。**genomic.gff はそのまま data/ に保管**しておけば、パラメータ（プロモーター長など）を変えて再実行するときに使えます。
+出力: `data/gene_list.json`, `data/gene_regions.db`, `data/gene_regions.pkl`  
+起動時は **gene_list.json + gene_regions.db** があれば遅延読み込み（低メモリ・Render 無料枠向け）。無い場合は `gene_regions.pkl` をまとめて読み込み。
 
-## 起動方法
-
-**仮想環境を使っている場合は、必ず activate してから、その Python で uvicorn を実行してください**（そうしないと conda base の Python が使われて ImportError になることがあります）。
+## ローカル起動
 
 ```bash
-source meth_viz_nanopore_env/bin/activate 
-/Users/namuuk/Desktop/methscope/meth_viz_nanopore_env/bin/python -m uvicorn app.main:app --reload --port 8000
+source .venv/bin/activate
+python -m uvicorn app.main:app --reload --port 8000
 ```
 
-ブラウザで **http://localhost:8000** を開く。
+→ **http://localhost:8000**
 
-### Docker で動かす
-
-#### ステップ 1: Docker が入っているか確認する
-
-ターミナルで次を実行し、バージョンが表示されれば OK です。
-
-```bash
-docker --version
-```
-
-入っていない場合は [Docker Desktop](https://www.docker.com/products/docker-desktop/)（Mac/Windows）などをインストールしてください。
-
----
-
-#### ステップ 2: 遺伝子データ（data）を用意する
-
-アプリは起動時に **data/gene_list.json** と **data/gene_regions.db** を参照します。  
-すでにローカルで `python scripts/build_gene_regions.py` を実行してある場合は、プロジェクト直下の **data/** にこの 2 ファイルがあればそのまま使えます。
-
-- まだない場合: `data/genomic.gff` を置き、`python scripts/build_gene_regions.py` を実行して `gene_list.json` と `gene_regions.db` を生成してください（README の「GFF の内蔵」を参照）。
-
----
-
-#### ステップ 3: プロジェクトのディレクトリに移動する
-
-```bash
-cd /Users/namuuk/Desktop/methscope
-```
-
-（パスは自分のプロジェクトの場所に合わせてください。）
-
----
-
-#### ステップ 4: Docker イメージをビルドする
+## Docker
 
 ```bash
 docker build -t methscope .
-```
-
-- `-t methscope` でイメージ名を「methscope」にしています。
-- 初回は数分かかることがあります。
-
----
-
-#### ステップ 5: コンテナを実行する
-
-```bash
 docker run -p 8000:8000 -v "$(pwd)/data:/app/data" methscope
 ```
 
-- **-p 8000:8000** … ホストの 8000 番をコンテナの 8000 番に繋ぎます。
-- **-v "$(pwd)/data:/app/data"** … 今いるディレクトリの **data/** をコンテナ内の **/app/data** にマウントします（gene_list.json と gene_regions.db をコンテナから参照するため）。
-- ログに `Uvicorn running on http://0.0.0.0:8000` と出れば起動しています。
+`data/` に `gene_list.json` と `gene_regions.db` をマウントする。コンテナ内 `PORT` は環境変数に対応。
 
 ---
 
-#### ステップ 6: ブラウザで開く
+## デプロイ（Render など）
 
-ブラウザで次の URL を開きます。
+**向かない:** Vercel 等のサーバーレス（常時プロセス・大きな参照データが前提）。
 
-**http://localhost:8000**
+**向いている:** Render / Railway / Fly.io など常時起動の Web サービス。
 
-BED をアップロードして、遺伝子検索・グラフ表示まで試せます。
-
----
-
-#### よく使う操作
-
-| やりたいこと | コマンド |
-|--------------|----------|
-| コンテナを止める | コンテナが動いているターミナルで **Ctrl+C** |
-| バックグラウンドで動かす | `docker run -d -p 8000:8000 -v "$(pwd)/data:/app/data" --name methscope-app methscope` |
-| 動いているコンテナを止める | `docker stop methscope-app` |
-| 止めたコンテナを再開 | `docker start methscope-app` |
-| イメージをやり直してから実行 | `docker build -t methscope .` のあと、再度 `docker run ...` |
-
-- イメージ内では `data/` は空なので、**gene_list.json** と **gene_regions.db** は必ず `-v` でマウントするか、コンテナ内に別途用意してください。
-- 本番（Render 等）では環境変数 `PORT` に合わせてコンテナ内でポートが切り替わるようになっています。
-
-## デプロイ（本番環境）
-
-このアプリは **常時起動の Python サーバー**と**メモリ上の状態**（起動時に読み込む `gene_regions.pkl`、アップロードした BED）に依存しているため、**Vercel のようなサーバーレス環境には向いていません**（インスタンスごとにメモリが分かれる・制限が厳しい・大容量 pkl のコールドスタートが重い）。
-
-**推奨:** 次のような「常時稼働コンテナ / サーバー」向けのサービスでデプロイしてください。
-
-| サービス | 手順の目安 |
-|----------|------------|
-| **[Railway](https://railway.app)** | リポジトリを連携 → ルートに `Dockerfile` または `railway.toml` + 起動コマンド `uvicorn app.main:app --host 0.0.0.0 --port $PORT` を指定。`data/gene_regions.pkl` はビルド時に生成するか、Volume で配置。 |
-| **[Render](https://render.com)** | New → Web Service → リポジトリ選択。Build: `pip install -r requirements.txt`、Start: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`。`data/` は Build 時に `build_gene_regions.py` で生成するか、永続ディスクに置く。 |
-| **[Fly.io](https://fly.io)** | `fly launch` 後、`fly.toml` で `cmd = "uvicorn app.main:app --host 0.0.0.0 --port 8080"`。`data/gene_regions.pkl` は Docker イメージに含めるか、Volume でマウント。 |
-
-共通のポイント:
-
-1. **ポート**  
-   本番では環境変数 `PORT` を使うことが多いので、起動コマンドを `uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}` のようにする。
-2. **data/**  
-   GitHub には載せない前提なので、デプロイ先で用意する必要がある。  
-   - ビルド時に `genomic.gff` を置き、`python scripts/build_gene_regions.py` を実行すると **gene_list.json**・**gene_regions.db**・**gene_regions.pkl** が生成される。  
-   - **遅延読み込み**: gene_list.json と gene_regions.db があれば、起動時はリストだけ読むため **512 MB で起動可能**（Render 無料枠向け）。  
-   - または別ストレージから取得して `data/` に配置する。
-
-### 無料枠で使うなら（Render / Railway / Fly.io）
-
-**遅延読み込み**（gene_list.json + gene_regions.db）を使うと、起動時は遺伝子リストだけを読むため **512 MB の無料枠で起動できます**。遺伝子の領域データはグラフ表示のリクエスト時にその1件だけ DB から読みます。
-
-| サービス | 無料枠の要点 | このプロジェクト向きか |
-|----------|----------------|-------------------------|
-| **[Render](https://render.com)** | 無料 Web サービスあり。**月 750 時間**まで。**15 分アクセスがないとスリープ**し、次のリクエストで復帰（数十秒かかることがある）。メモリは無料枠でも 512 MB。 | **◎ 無料で使うならここ。** ビルドで gene_list.json + gene_regions.db を生成すれば、遅延読み込みで 512 MB で起動可能。 |
-| **[Railway](https://railway.app)** | **常設の無料枠はなし**。$5 のトライアル後は Hobby で **$5/月**（クレジット込み）の従量課金。 | △ 無料で長く使いたい場合は不向き。有料なら常時起動・設定しやすい。 |
-| **[Fly.io](https://fly.io)** | 無料で **256 MB の VM が 3 台**程度。請求が **$5 未満の月は未請求**になる運用だが、公式保証ではない。256 MB だと pkl + BED で足りない可能性。512 MB にするとわずかに課金の可能性。 | ○ 常時起動にしたい場合の候補。256 MB では厳しいので、512 MB で「ほぼ無料」になるか要確認。 |
-
-**結論:**  
-- **完全無料で試したい → Render**（スリープあり・起動遅延ありで我慢）。  
-- **常時起動を優先し、月数ドル出せる → Railway（Hobby）** か **Fly.io（512 MB）**。
-
----
-
-### Render へのデプロイ（手順）
-
-#### 1. 前提：genomic.gff をダウンロード用 URL で用意する
-
-Render のビルドでは **gene_list.json** と **gene_regions.db**（および gene_regions.pkl）を生成するために **genomic.gff** が必要です。GitHub には載せないので、次のいずれかで「直接ダウンロードできる URL」を用意します。
-
-- **Dropbox**: ファイルをアップロード → 共有リンク作成 → リンク末尾の `?dl=0` を **`?dl=1`** に変えた URL（例: `https://www.dropbox.com/s/xxxxx/genomic.gff?dl=1`）
-- **Google Drive**: 共有リンクの ID を使って `https://drive.google.com/uc?export=download&id=ファイルID` 形式の URL（大きいファイルは要確認）
-- **AWS S3 / 他のクラウド**: 公開読み取り可能な URL
-
-この URL をあとで環境変数 **`BUILD_GFF_URL`** に設定します。
-
-#### 2. Render でアカウント作成とリポジトリ連携
-
-1. [Render](https://render.com) にアクセスし、**Sign Up**（GitHub で登録すると連携が簡単です）。
-2. ダッシュボードで **New +** → **Web Service** を選択。
-3. **Connect a repository** で、このプロジェクトの GitHub リポジトリを選び **Connect**。
-4. リポジトリが表示されたら **Connect** をクリック。
-
-#### 3. Web Service の設定
-
-次のように入力します。
-
-| 項目 | 値 |
+| 項目 | 例 |
 |------|-----|
-| **Name** | 任意（例: `meth-viz-nanopore`） |
-| **Region** | お好みのリージョン（例: Singapore または Oregon） |
-| **Branch** | `main`（デフォルトのまま） |
-| **Runtime** | **Python 3** |
-| **Build Command** | `bash scripts/render_build.sh` |
-| **Start Command** | `uvicorn app.main:app --host 0.0.0.0 --port $PORT` |
-| **Instance Type** | **Free**（無料枠） |
+| Build | `pip install -r requirements.txt` または `bash scripts/render_build.sh`（GFF をビルドで取る場合） |
+| Start | `uvicorn app.main:app --host 0.0.0.0 --port $PORT` |
 
-#### 4. 環境変数を追加
+**参照データの渡し方（どちらか）**
 
-**Environment** セクションで **Add Environment Variable** をクリックし、1 つ追加します。
+1. **Cloudflare R2 または AWS S3**（推奨・ビルド短縮）  
+   環境変数で `R2_*` または `S3_*` を設定。起動時に `methscope-data/reference/` から `gene_list.json` と `gene_regions.db` を取得。`BUILD_GFF_URL` は不要。
 
-| Key | Value |
-|-----|--------|
-| `BUILD_GFF_URL` | 手順 1 で用意した genomic.gff の**直接ダウンロード URL** |
+2. **ビルド時に GFF から生成**  
+   `BUILD_GFF_URL` に genomic.gff の直接ダウンロード URL を設定し、`bash scripts/render_build.sh` でビルド（10〜15 分程度のことあり）。
 
-これでビルド時に GFF が取得され、`data/gene_list.json` と `data/gene_regions.db`（および `data/gene_regions.pkl`）が生成されます。アプリは **遅延読み込み** で起動するため、512 MB の無料枠で動作します。
-
-#### 5. デプロイ実行
-
-1. 画面下部の **Create Web Service** をクリック。
-2. ビルドが始まります。GFF のダウンロードと `build_gene_regions.py` の実行で **おおむね 10〜15 分**かかることがあります。
-3. ビルドが成功すると自動で起動し、**Your service is live at …** の URL（例: `https://meth-viz-nanopore.onrender.com`）でアクセスできます。
-
-#### 6. 動作確認
-
-- ブラウザで上記 URL を開く。
-- BED ファイルをアップロード → 遺伝子名で検索 → グラフ表示まで試す。
-- 無料枠では **15 分間アクセスがないとスリープ**します。再度開くと復帰まで数十秒かかることがあります。
-
-#### トラブルシューティング
-
-- **ビルドが "Error" になる**  
-  - **Logs** タブでエラー内容を確認。  
-  - `BUILD_GFF_URL` が正しいか、その URL をブラウザで開いたときに GFF がダウンロードされるか確認。
-- **「Gene regions not loaded」と表示される**  
-  - ビルド時に `gene_list.json` と `gene_regions.db`（または `gene_regions.pkl`）が作られていません。`BUILD_GFF_URL` を設定したうえで **Manual Deploy** → **Clear build cache & deploy** で再デプロイ。
-- **起動が遅い**  
-  - 無料枠のスリープからの復帰です。そのまま待つか、有料プランでスリープを無効にできます。
+無料枠（512 MB）では遅延読み込み + 非同期 BED ジョブを利用。スリープ・初回応答遅延は Render 無料枠の仕様です。
 
 ---
 
-## CI/CD (GitHub Actions)
+## オブジェクトストレージ（任意・R2 / S3）
 
-`.github/workflows/deploy.yml` で以下を実行します。
+アップロードした BED をクラウドに置き、参照データもクラウドから取得できます。
 
-- **CI**（push / PR 時）  
-  - Python 3.11 で `pip install -r requirements.txt`  
-  - アプリのインポート確認（`from app.main import app`）  
-  - `docker build` で Dockerfile のビルド確認  
-- **CD**（main への push のみ、CI 成功後）  
-  - Render の **Deploy Hook** を POST してデプロイを開始  
+**キー構成（共通）**
 
-### Render Deploy Hook の設定（CD で自動デプロイする場合）
+```
+methscope-data/
+  reference/   gene_list.json, gene_regions.db（必須）, genomic.gff（任意）
+  uploads/     {job_id}.bed（アプリが保存）
+```
 
-1. [Render Dashboard](https://dashboard.render.com) → 対象の Web Service → **Settings**  
-2. **Deploy Hook** の URL をコピー  
-3. GitHub リポジトリ → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**  
-4. Name: `RENDER_DEPLOY_HOOK_URL`、Value: コピーした Deploy Hook URL を貼って保存  
+**アップロード（ローカル → バケット）**
 
-これで `main` に push すると、CI 通過後に Render が自動で再デプロイされます。  
-（Secret を設定しない場合は CD ステップはスキップされ、CI のみ実行されます。）
+```bash
+python scripts/build_gene_regions.py
+export R2_BUCKET=... R2_ACCOUNT_ID=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=...
+# または S3: S3_BUCKET, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION
+python scripts/upload_reference_to_s3.py
+```
+
+**アプリ側の環境変数**
+
+| R2 | S3 |
+|----|-----|
+| `R2_BUCKET`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | `S3_BUCKET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`（任意） |
+
+R2 の詳細手順は Cloudflare ダッシュボードで **R2 → バケット作成 → Manage R2 API Tokens（Read & Write）** を参照。
 
 ---
 
-## 使い方
+## CI/CD
 
-1. **ファイルアップロード**  
-   - **modkit BED** のみ選択: 例 `r0081_m.bed` または `r0081_m_chr.bed`（染色体名は `chr1` でも `NC_000067.7` など RefSeq でも可）  
-   - 「アップロード」をクリック。（アノテーションはアプリ内蔵のため GFF のアップロードは不要）
+`.github/workflows/deploy.yml`: push/PR で依存インストール・インポート確認・`docker build`。`main` への push 後、Secret `RENDER_DEPLOY_HOOK_URL` があれば Render の Deploy Hook を叩く。
 
-2. **遺伝子検索**  
-   - 検索ボックスに遺伝子名（例: `Xkr4`, `Bdnf`）を入力。  
-   - 候補から選択するか、そのまま「グラフ表示」をクリック。
+---
 
-3. **グラフ**  
-   - X 軸: ゲノム位置  
-   - Y 軸: メチル化率（%）  
-   - 色付きの縦帯: プロモーター / エクソン / イントロン / 下流領域（凡例あり）  
-   - ホバーで各サイトの位置・メチル化率・カバレッジを表示。
+## 使い方（UI）
+
+1. modkit **BED** をアップロード（処理完了までポーリング）。
+2. 遺伝子名を検索 → **グラフ表示**。
+
+---
 
 ## プロジェクト構成
 
 ```
-meth_viz_nanopore/
-├── .gitignore
-├── README.md
-├── PROJECT_PLAN.md
-├── requirements.txt
-├── gene_methylation.py          # 遺伝子領域抽出・メチル化サイト取得
+methscope/
 ├── app/
-│   ├── main.py                  # FastAPI（BED アップロード・API）
-│   └── static/
-│       └── index.html            # フロント（アップロード UI・Plotly グラフ）
-├── data/
-│   └── .gitkeep                 # genomic.gff / gene_list.json / gene_regions.db / gene_regions.pkl（git では無視）
-└── scripts/
-    ├── build_gene_regions.py    # GFF → gene_list.json + gene_regions.db + gene_regions.pkl
-    └── render_build.sh          # Render 用ビルド（BUILD_GFF_URL で GFF 取得 → 上記生成）
+│   ├── main.py           # FastAPI
+│   └── static/index.html
+├── gene_methylation.py
+├── requirements.txt
+├── Dockerfile
+├── scripts/
+│   ├── build_gene_regions.py
+│   ├── render_build.sh
+│   └── upload_reference_to_s3.py
+├── data/                 # ローカル用（大きいファイルは .gitignore）
+└── .github/workflows/deploy.yml
 ```
+
+---
 
 ## API（参考）
 
 | メソッド | パス | 説明 |
 |----------|------|------|
-| GET | `/health` | ヘルスチェック（デプロイ・LB 用）。常に 200 で `{"status":"ok"}` を返す。 |
-| GET | `/api/status` | アプリ状態（gene_regions 読み込み有無・遺伝子数・BED 読み込み有無・行数）。 |
-| POST | `/api/upload` | BED のみ multipart でアップロード。 |
-| GET | `/api/genes` | 遺伝子名一覧。クエリ `?q=xxx` で部分一致検索（省略可）。 |
-| GET | `/api/gene/{gene_id}` | 指定遺伝子のメチル化サイトと領域情報（JSON）。 |
+| GET | `/health` | ヘルスチェック |
+| GET | `/api/status` | gene_regions / BED / current_job_id |
+| POST | `/api/upload` | BED → `{ job_id, status: "processing" }` |
+| GET | `/api/jobs/{job_id}` | `processing` / `ready` / `failed` |
+| GET | `/api/genes` | 遺伝子一覧、`?q=` でフィルタ |
+| GET | `/api/gene/{gene_id}` | プロット用 JSON |
 
-Swagger UI: **http://localhost:8000/docs**
+Swagger: `/docs`
+
+---
 
 ## 注意
 
-- BED の染色体名が `chr1`, `chr2` … で、GFF が RefSeq (`NC_000067.7` 等) の場合は、`gene_methylation.py` 内の `CHROM_GFF_TO_CHR` で対応しています（GRCm39 想定）。
-- アップロードしたファイルはサーバーの一時ディレクトリに保存され、再起動や再アップロードで上書きされます。
+- BED の `chr1` と GFF の RefSeq（例 `NC_000067.7`）は `gene_methylation.py` の `CHROM_GFF_TO_CHR`（GRCm39 想定）で対応。
+- BED はローカル `data/uploads/` または **R2/S3 設定時はクラウド**に保存。ジョブ完了後はメモリ上の DataFrame で参照。

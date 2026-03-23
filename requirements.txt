@@ -6,3 +6,5 @@ pydantic>=2.0,<3
 fastapi>=0.100.0
 uvicorn[standard]>=0.22.0
 python-multipart>=0.0.6
+# Optional: for S3 reference data and uploads
+boto3>=1.28.0
