@@ -23,6 +23,8 @@ from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 
+from pydantic import BaseModel, Field
+
 from fastapi import FastAPI, File, UploadFile, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -35,8 +37,28 @@ from gene_methylation import (
     load_bed_dataframe,
     extract_regions,
 )
+from app.assistant_rag import (
+    cf_workers_ai_configured,
+    generate_chat_reply,
+    generate_overview,
+)
 
 app = FastAPI(title="Nanopore Gene Methylation Viz")
+
+
+class AssistantOverviewRequest(BaseModel):
+    species: str = "Mus musculus"
+    sample: str = ""
+    gene_name: str = Field(..., min_length=1)
+
+
+class AssistantChatRequest(BaseModel):
+    species: str = "Mus musculus"
+    sample: str = ""
+    gene_name: str = Field(..., min_length=1)
+    question: str = Field(..., min_length=1)
+    messages: list[dict[str, str]] = Field(default_factory=list)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -397,6 +419,42 @@ async def get_job_status(job_id: str):
     if job["status"] == "failed":
         out["error"] = job.get("error", "Unknown error")
     return out
+
+
+@app.get("/api/assistant/config")
+async def assistant_config():
+    """Workers AI (Cloudflare) が設定されているか。フロント表示用。"""
+    return {"workers_ai_configured": cf_workers_ai_configured()}
+
+
+@app.post("/api/assistant/overview")
+async def assistant_overview(body: AssistantOverviewRequest):
+    """PubMed / Semantic Scholar を検索し、Workers AI で遺伝子メチル化の解釈ドラフトを返す。"""
+    try:
+        return await generate_overview(body.species, body.sample, body.gene_name)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        logging.exception("[API] assistant overview failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/assistant/chat")
+async def assistant_chat(body: AssistantChatRequest):
+    """同じ RAG コンテキスト上で追加 Q&A。"""
+    try:
+        return await generate_chat_reply(
+            body.species,
+            body.sample,
+            body.gene_name,
+            body.question,
+            body.messages,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        logging.exception("[API] assistant chat failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/genes")

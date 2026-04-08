@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Nanopore Gene Methylation Viz</title>
+  <title>MethScope</title>
   <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
   <style>
     :root {
@@ -33,11 +33,6 @@
       font-size: 1.5rem;
       font-weight: 600;
       margin-bottom: 0.5rem;
-    }
-    .subtitle {
-      color: var(--muted);
-      font-size: 0.9rem;
-      margin-bottom: 1.5rem;
     }
     section {
       background: var(--surface);
@@ -134,10 +129,37 @@
     }
     .status.error { color: #f85149; }
     .status.ok { color: #3fb950; }
+    .plot-assistant-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1.25rem;
+      align-items: flex-start;
+      margin-top: 0.75rem;
+    }
+    .plot-col {
+      flex: 1 1 360px;
+      min-width: 0;
+    }
     #plotContainer {
-      min-height: 420px;
+      min-height: 380px;
       width: 100%;
     }
+    .assistant-col {
+      flex: 0 1 340px;
+      width: 100%;
+      max-width: 400px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+    }
+    .assistant-col h3 {
+      font-size: 0.8rem;
+      font-weight: 600;
+      margin: 0.75rem 0 0.35rem 0;
+      color: var(--muted);
+    }
+    .assistant-col h3:first-child { margin-top: 0; }
     .legend-regions {
       display: flex;
       flex-wrap: wrap;
@@ -162,13 +184,70 @@
     .legend-regions .intron { background: var(--intron); border: 1px solid #d2a8ff; }
     .legend-regions .cds { background: var(--cds); border: 1px solid #c85032; }
     .legend-regions .downstream { background: var(--downstream); border: 1px solid #ffd381; }
+    .assistant-panel {
+      font-size: 0.88rem;
+      line-height: 1.5;
+    }
+    .assistant-overview {
+      white-space: normal;
+      word-break: break-word;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.65rem 0.75rem;
+      margin-top: 0.35rem;
+      max-height: 360px;
+      overflow-y: auto;
+      font-size: 0.82rem;
+      line-height: 1.55;
+    }
+    .assistant-overview strong {
+      font-weight: 600;
+      color: var(--text);
+    }
+    .paper-list {
+      margin-top: 0.35rem;
+      padding-left: 1rem;
+      color: var(--muted);
+      font-size: 0.78rem;
+      max-height: 120px;
+      overflow-y: auto;
+    }
+    .paper-list a { color: var(--accent); }
+    .chat-log {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.5rem 0.65rem;
+      min-height: 80px;
+      max-height: 160px;
+      overflow-y: auto;
+      margin-bottom: 0.5rem;
+      font-size: 0.82rem;
+    }
+    .chat-log .msg { margin-bottom: 0.65rem; }
+    .chat-log .msg.user { color: var(--text); }
+    .chat-log .msg.assistant { color: var(--muted); border-left: 3px solid var(--accent); padding-left: 0.5rem; }
+    .chat-log .msg.assistant strong { font-weight: 600; color: var(--text); }
+    .chat-log .role { font-size: 0.75rem; font-weight: 600; color: var(--muted); margin-bottom: 0.2rem; }
+    textarea#chatInput {
+      width: 100%;
+      min-height: 52px;
+      padding: 0.45rem 0.6rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-family: inherit;
+      font-size: 0.82rem;
+      resize: vertical;
+    }
+    .chat-actions { display: flex; gap: 0.75rem; align-items: center; margin-top: 0.5rem; flex-wrap: wrap; }
   </style>
 </head>
 <body>
-  <h1>Nanopore Gene Methylation Viz</h1>
+  <h1>MethScope</h1>
 
   <section>
-    <h2>1. ファイルアップロード</h2>
+    <h2>1. BED アップロード</h2>
     <div class="form-row">
       <div class="field">
         <label for="bedFile">modkit BED（例: xxx.bed）</label>
@@ -180,10 +259,10 @@
   </section>
 
   <section>
-    <h2>2. 遺伝子を検索してグラフ表示</h2>
+    <h2>2. 遺伝子検索・グラフ</h2>
     <div class="search-row">
       <div class="search-wrap">
-        <input type="text" id="geneSearch" placeholder="遺伝子名を入力（例: Xkr4, Bdnf）" autocomplete="off">
+        <input type="text" id="geneSearch" placeholder="遺伝子名" autocomplete="off">
         <div id="geneSuggest" style="display: none;"></div>
       </div>
       <button type="button" id="plotBtn" disabled>グラフ表示</button>
@@ -196,12 +275,89 @@
       <span><i class="cds"></i> CDS</span>
       <span><i class="downstream"></i> Downstream</span>
     </div>
-    <div id="plotContainer"></div>
+    <div class="plot-assistant-row">
+      <div class="plot-col">
+        <div id="plotContainer"></div>
+      </div>
+      <aside id="assistantSection" class="assistant-col assistant-panel" style="display: none;" aria-label="AI アシスタント">
+        <h3>AI アシスタント</h3>
+        <div class="field" style="margin-bottom: 0.5rem;">
+          <label for="speciesInput">種</label>
+          <input type="text" id="speciesInput" value="Mus musculus" style="width: 100%; padding: 0.45rem 0.6rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font-size: 0.85rem;">
+        </div>
+        <div class="field" style="margin-bottom: 0.5rem;">
+          <label for="sampleInput">サンプル（組織・細胞）</label>
+          <input type="text" id="sampleInput" placeholder="任意" style="width: 100%; padding: 0.45rem 0.6rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font-size: 0.85rem;">
+        </div>
+        <button type="button" id="overviewLoadBtn" disabled style="width: 100%; margin-bottom: 0.35rem;">概要を取得</button>
+        <p class="status" id="assistantOverviewStatus" style="margin-top: 0;"></p>
+        <h3>概要</h3>
+        <div id="assistantOverview" class="assistant-overview" style="display: none;"></div>
+        <h3 id="assistantPapersHeading" style="display: none;">文献</h3>
+        <ul id="assistantPapers" class="paper-list" style="display: none;"></ul>
+        <h3>Q&amp;A</h3>
+        <div id="chatLog" class="chat-log"></div>
+        <textarea id="chatInput" placeholder="質問"></textarea>
+        <div class="chat-actions">
+          <button type="button" id="chatSendBtn" disabled>送信</button>
+          <span class="status" id="chatStatus"></span>
+        </div>
+      </aside>
+    </div>
   </section>
 
   <script>
     const API = "";
     let allGenes = [];
+    let assistantGene = null;
+    const chatHistory = [];
+    let workersAiConfigured = false;
+
+    async function fetchAssistantConfig() {
+      try {
+        const r = await fetch(API + "/api/assistant/config");
+        if (!r.ok) return workersAiConfigured;
+        const j = await r.json();
+        workersAiConfigured = !!j.workers_ai_configured;
+        return workersAiConfigured;
+      } catch (_) {
+        return workersAiConfigured;
+      }
+    }
+
+    function errDetail(d) {
+      if (typeof d === "string") return d;
+      if (Array.isArray(d)) return d.map((x) => x.msg || JSON.stringify(x)).join("; ");
+      return JSON.stringify(d || "");
+    }
+
+    async function postAssistantOverview(species, sample, geneName) {
+      const r = await fetch(API + "/api/assistant/overview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ species, sample, gene_name: geneName }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(errDetail(j.detail) || r.statusText || "overview failed");
+      return j;
+    }
+
+    async function postAssistantChat(species, sample, geneName, question, messages) {
+      const r = await fetch(API + "/api/assistant/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          species,
+          sample,
+          gene_name: geneName,
+          question,
+          messages,
+        }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(errDetail(j.detail) || r.statusText || "chat failed");
+      return j;
+    }
 
     async function postUpload(fd) {
       const r = await fetch(API + "/api/upload", { method: "POST", body: fd });
@@ -249,6 +405,79 @@
     const plotBtn = document.getElementById("plotBtn");
     const plotContainer = document.getElementById("plotContainer");
     const legendRegions = document.getElementById("legendRegions");
+    const speciesInput = document.getElementById("speciesInput");
+    const sampleInput = document.getElementById("sampleInput");
+    const assistantSection = document.getElementById("assistantSection");
+    const assistantOverviewStatus = document.getElementById("assistantOverviewStatus");
+    const assistantOverview = document.getElementById("assistantOverview");
+    const assistantPapers = document.getElementById("assistantPapers");
+    const chatLog = document.getElementById("chatLog");
+    const chatInput = document.getElementById("chatInput");
+    const chatSendBtn = document.getElementById("chatSendBtn");
+    const chatStatus = document.getElementById("chatStatus");
+    const overviewLoadBtn = document.getElementById("overviewLoadBtn");
+
+    fetchAssistantConfig();
+
+    function clearAssistantPanel() {
+      assistantOverview.innerHTML = "";
+      assistantOverview.style.display = "none";
+      assistantPapers.style.display = "none";
+      assistantPapers.innerHTML = "";
+      const ph = document.getElementById("assistantPapersHeading");
+      if (ph) ph.style.display = "none";
+      assistantOverviewStatus.textContent = "";
+      assistantOverviewStatus.className = "status";
+      chatSendBtn.disabled = true;
+    }
+
+    function resetAssistantForNewPlot() {
+      chatHistory.length = 0;
+      chatLog.innerHTML = "";
+      clearAssistantPanel();
+    }
+
+    function renderPaperList(papers) {
+      const ph = document.getElementById("assistantPapersHeading");
+      assistantPapers.innerHTML = "";
+      if (!papers || !papers.length) {
+        assistantPapers.style.display = "none";
+        if (ph) ph.style.display = "none";
+        return;
+      }
+      if (ph) ph.style.display = "block";
+      papers.forEach((p) => {
+        const li = document.createElement("li");
+        const title = escapeHtml(p.title || p.id || "");
+        const url = p.url || "";
+        const src = escapeHtml(p.source || "");
+        if (url) {
+          li.innerHTML = "[" + src + "] <a href=\"" + escapeHtml(url) + "\" target=\"_blank\" rel=\"noopener\">" + title + "</a>";
+        } else {
+          li.textContent = "[" + (p.source || "") + "] " + (p.title || p.id);
+        }
+        assistantPapers.appendChild(li);
+      });
+      assistantPapers.style.display = "block";
+    }
+
+    function appendChatLog(role, text) {
+      const wrap = document.createElement("div");
+      wrap.className = "msg " + role;
+      const roleEl = document.createElement("div");
+      roleEl.className = "role";
+      roleEl.textContent = role === "user" ? "あなた" : "MethScope AI";
+      const body = document.createElement("div");
+      if (role === "assistant") {
+        body.innerHTML = assistantMarkdownToHtml(text);
+      } else {
+        body.textContent = text;
+      }
+      wrap.appendChild(roleEl);
+      wrap.appendChild(body);
+      chatLog.appendChild(wrap);
+      chatLog.scrollTop = chatLog.scrollHeight;
+    }
 
     document.getElementById("uploadBtn").addEventListener("click", async () => {
       const bed = document.getElementById("bedFile").files[0];
@@ -271,6 +500,7 @@
         allGenes = await fetchGenes();
         plotBtn.disabled = false;
         searchStatus.textContent = "遺伝子数: " + allGenes.length;
+        fetchAssistantConfig();
       } catch (e) {
         uploadStatus.textContent = "エラー: " + e.message;
         uploadStatus.className = "status error";
@@ -304,6 +534,17 @@
       const div = document.createElement("div");
       div.textContent = s;
       return div.innerHTML;
+    }
+
+    /** AI テキストの **太字** を表示用 HTML に（XSS 対策で先にエスケープ） */
+    function assistantMarkdownToHtml(raw) {
+      if (raw == null || raw === "") return "";
+      let s = escapeHtml(String(raw));
+      s = s.replace(/\*\*([\s\S]*?)\*\*/g, function (_, inner) {
+        return "<strong>" + inner + "</strong>";
+      });
+      s = s.replace(/\n/g, "<br>");
+      return s;
     }
 
     const regionColors = {
@@ -385,11 +626,91 @@
           title: { text: "Gene: " + gene + " (strand " + strand + ", " + exonCount + " exons, " + cdsCount + " CDS)", font: { size: 14 } },
           showlegend: false
         }, { responsive: true });
+
+        assistantSection.style.display = "block";
+        await fetchAssistantConfig();
+        assistantGene = gene;
+        resetAssistantForNewPlot();
+        overviewLoadBtn.disabled = false;
+        assistantOverviewStatus.textContent = "「概要を取得」で文献検索・解釈を実行できます。";
+        assistantOverviewStatus.className = "status ok";
       } catch (e) {
         searchStatus.textContent = "エラー: " + e.message;
         searchStatus.className = "status error";
         plotContainer.innerHTML = "";
       }
+    });
+
+    overviewLoadBtn.addEventListener("click", async () => {
+      if (!assistantGene) return;
+      await fetchAssistantConfig();
+      const species = speciesInput ? speciesInput.value.trim() || "Mus musculus" : "Mus musculus";
+      const sample = sampleInput ? sampleInput.value.trim() : "";
+      overviewLoadBtn.disabled = true;
+      assistantOverviewStatus.textContent = workersAiConfigured
+        ? "生成中…"
+        : "AI 未設定です。";
+      assistantOverviewStatus.className = "status";
+      if (!workersAiConfigured) {
+        assistantOverview.style.display = "none";
+        assistantPapers.style.display = "none";
+        chatSendBtn.disabled = true;
+        overviewLoadBtn.disabled = false;
+        return;
+      }
+      try {
+        const ao = await postAssistantOverview(species, sample, assistantGene);
+        assistantOverview.innerHTML = assistantMarkdownToHtml(ao.interpretation || "");
+        assistantOverview.style.display = "block";
+        renderPaperList(ao.papers);
+        assistantOverviewStatus.textContent =
+          "完了（文献 " + (ao.papers && ao.papers.length ? ao.papers.length : 0) + " 件）";
+        assistantOverviewStatus.className = "status ok";
+        chatSendBtn.disabled = false;
+      } catch (ae) {
+        assistantOverviewStatus.textContent = "エラー: " + ae.message;
+        assistantOverviewStatus.className = "status error";
+        assistantOverview.style.display = "none";
+        assistantPapers.style.display = "none";
+        chatSendBtn.disabled = true;
+      }
+      overviewLoadBtn.disabled = false;
+    });
+
+    chatSendBtn.addEventListener("click", async () => {
+      const q = chatInput.value.trim();
+      if (!q || !assistantGene) return;
+      if (!workersAiConfigured) {
+        chatStatus.textContent = "AI 未設定";
+        return;
+      }
+      chatSendBtn.disabled = true;
+      chatStatus.textContent = "回答生成中…";
+      chatStatus.className = "status";
+      appendChatLog("user", q);
+      chatInput.value = "";
+      try {
+        const prior = chatHistory.map((m) => ({ role: m.role, content: m.content }));
+        const res = await postAssistantChat(
+          speciesInput ? speciesInput.value.trim() || "Mus musculus" : "Mus musculus",
+          sampleInput ? sampleInput.value.trim() : "",
+          assistantGene,
+          q,
+          prior
+        );
+        chatHistory.push({ role: "user", content: q });
+        chatHistory.push({ role: "assistant", content: res.reply || "" });
+        appendChatLog("assistant", res.reply || "");
+        if (res.papers && res.papers.length) {
+          renderPaperList(res.papers);
+        }
+        chatStatus.textContent = "完了";
+        chatStatus.className = "status ok";
+      } catch (e) {
+        chatStatus.textContent = "エラー: " + e.message;
+        chatStatus.className = "status error";
+      }
+      chatSendBtn.disabled = false;
     });
   </script>
 </body>
