@@ -27,3 +27,8 @@ python -m uvicorn app.main:app --reload --port 8000
 ```
 
 ブラウザで **http://localhost:8000**
+
+## 動作確認
+https://github.com/user-attachments/assets/5a055661-742b-426d-9c7a-dc7ec41f99a6
+
+
